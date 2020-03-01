@@ -1,0 +1,688 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: appcd-template-
+spec:
+  entrypoint: appcd
+  arguments:
+      parameters:
+      - name: gitrepo
+        value: tde.sktelecom.com/stash/scm/oreotools/appcd
+        #value: "TDE_CONFIG_REPO"
+      - name: tdeid
+        #value: "TDE_USER_ID" you need this when you access helm chart in tde
+        value: "USER_ID"
+      - name: tdepassword
+        #value: "TDE_USER_PW" you need this when you access helm chart in tde
+        value: "USER_PASSWORD"
+      - name: argoid
+        value: admin
+      - name: argopassword
+        value: 1222
+      - name: argocdtoken
+        value: "ARGOCD_TOKEN"
+      - name: clusterIPport
+        value: "192.168.48.12:31410"
+        #this argoid, argopassword, argotoken, clusterIPport are only valid for sk 192.168.48.12:31410 server
+        #you have to change these values
+        #how to get argocd token for your own id, pw? ->https://argoproj.github.io/argo-cd/developer-guide/api-docs/
+        #this token is essential to API curl to argocd cluster
+
+  templates:
+    - name: appcd
+      steps:
+      #- - name: argocdcred
+      #    template: argocdcred-template
+      # credential isn't perfect
+      - - name: repoauthset
+          template: repoauthset-dags
+      - - name: repodownload
+          template: repodownload-template
+          arguments:
+            parameters:
+              - name: downloadurl
+                value: "https://{{workflow.parameters.gitrepo}}"
+        - name: getcurrentapps
+          template: getcurrentapps-steps
+          arguments:
+            parameters:
+              - name: method
+                value: "GET"
+              - name: argocdtoken
+                value: "{{workflow.parameters.argocdtoken}}"
+              - name: url
+                value: "{{workflow.parameters.clusterIPport}}/api/v1/applications"
+      - - name: configtoapp
+          template: configtoapp-steps
+          arguments:
+            artifacts:
+              - name: currentapps
+                from: "{{steps.getcurrentapps.outputs.artifacts.currentapps}}"
+              - name: configbyte
+                from: "{{steps.repodownload.outputs.artifacts.config}}"
+            parameters:
+              - name: flag
+                value: "{{item.flag}}"
+          withItems:
+          - { flag: "auto"}
+          - { flag: "manual" }
+#########
+    - name: getcurrentapps-steps
+      inputs:
+        parameters:
+          - name: method
+          - name: argocdtoken
+          - name: url
+      steps:
+        - - name: getcurrentapps
+            template: nobodycurl-template
+            arguments:
+              parameters:
+                - name: method
+                  value: "{{inputs.parameters.method}}"
+                - name: argocdtoken
+                  value: "{{inputs.parameters.argocdtoken}}"
+                - name: url
+                  value: "{{inputs.parameters.url}}"
+        - - name: appclassify
+            template: appclassify-template
+            arguments:
+              artifacts:
+                - name: notsplit
+                  from: "{{steps.getcurrentapps.outputs.artifacts.notsplit}}"
+      outputs:
+        artifacts:
+          - name: currentapps
+            from: "{{steps.appclassify.outputs.artifacts.currentapps}}"
+#######
+    - name: configtoapp-steps
+      inputs:
+        artifacts:
+          - name: currentapps
+          - name: configbyte
+        parameters:
+          - name: flag
+      steps:
+        - - name: lintconfig
+            template: lintconfig-template
+            arguments:
+              artifacts:
+                - name: configbyte_lint
+                  from: "{{inputs.artifacts.configbyte}}"
+              parameters:
+                - name: flag_lint
+                  value: "{{inputs.parameters.flag}}"
+        - - name: convertconfigtoapps
+            template: convertconfigtoapps-template
+            arguments:
+              artifacts:
+                - name: configbyte_convert
+                  from: "{{inputs.artifacts.configbyte}}"
+              parameters:
+                - name: flag_convert
+                  value: "{{inputs.parameters.flag}}"
+        - - name: chartrepoaccess
+            template: chartrepoaccess-steps
+            arguments:
+              artifacts:
+                - name: configApps
+                  from: "{{steps.convertconfigtoapps.outputs.artifacts.convertbyte}}"
+        - - name: diffcurrentwithtarget
+            template: diffcurrentwithtarget-template
+            arguments:
+              artifacts:
+                - name: configApps
+                  from: "{{steps.convertconfigtoapps.outputs.artifacts.convertbyte}}"
+                - name: currentApps
+                  from: "{{inputs.artifacts.currentapps}}"
+              parameters:
+                - name: flag
+                  value: "{{inputs.parameters.flag}}"
+        - - name: splitapp
+            template: splitapp-steps
+            arguments:
+              artifacts:
+                - name: afterdiff
+                  from: "{{steps.diffcurrentwithtarget.outputs.artifacts.diffsrc}}"
+              parameters:
+                - name: action
+                  value: "{{item.flag}}"
+            withItems:
+              - { flag: "CREATE"}
+              - { flag: "DELETE"}
+              - { flag: "UPDATE"}
+######
+    - name: chartrepoaccess-steps
+      inputs:
+        artifacts:
+          - name: configApps
+      steps:
+        - - name: getchartreponames
+            template: getchartreponames-template
+            arguments:
+              artifacts:
+                - name: configApps
+                  from: "{{inputs.artifacts.configApps}}"
+        - - name: chartrepoadd
+            template: chartrepoadd-template
+            arguments:
+              parameters:
+                - name: chartreponame
+                  value: "{{item.repourl}}"
+                - name: argourl
+                  value: "{{workflow.parameters.clusterIPport}}/api/v1/repositories"
+                - name: token
+                  value: "{{workflow.parameters.argocdtoken}}"
+            withParam:
+              "{{steps.getchartreponames.outputs.result}}"
+#######
+    - name: splitapp-steps
+      inputs:
+        artifacts:
+          - name: afterdiff
+        parameters:
+          - name: action
+      steps:
+        - - name: findappname
+            template: findappnames-template
+            arguments:
+              artifacts:
+                - name: apps
+                  from: "{{inputs.artifacts.afterdiff}}"
+              parameters:
+                - name: action
+                  value: "{{inputs.parameters.action}}"
+        - - name: splitapps
+            template: curltoargocd-steps
+            arguments:
+              parameters:
+                - name: action
+                  value: "{{inputs.parameters.action}}"
+                - name: name
+                  value: "{{item.name}}"
+              artifacts:
+                - name: apps
+                  from: "{{inputs.artifacts.afterdiff}}"
+            withParam:
+              "{{steps.findappname.outputs.parameters.appnames}}"
+            when: "{{steps.findappname.outputs.result}} == TRUE"
+###########
+    - name: curltoargocd-steps
+      inputs:
+        artifacts:
+          - name: apps
+        parameters:
+          - name: action
+          - name: name
+      steps:
+        - - name: getrequestbodybyname
+            template: getrequestbodybyname-template
+            arguments:
+              artifacts:
+                - name: apps
+                  from: "{{inputs.artifacts.apps}}"
+              parameters:
+                - name: action
+                  value: "{{inputs.parameters.action}}"
+                - name: name
+                  value: "{{inputs.parameters.name}}"
+        - - name: curlaction
+            template: curlaction-steps
+            arguments:
+              parameters:
+                - name: curl-name
+                  value: "{{inputs.parameters.name}}"
+                - name: curl-actionflag
+                  value: "{{inputs.parameters.action}}"
+              artifacts:
+                - name: curl-body
+                  from: "{{steps.getrequestbodybyname.outputs.artifacts.requestbody}}"
+#########
+    - name: curlaction-steps
+      inputs:
+        parameters:
+          - name: curl-name
+          - name: curl-actionflag
+        artifacts:
+          - name: curl-body
+      steps:
+        - - name: curl-create
+            template: curlwithbody-template
+            arguments:
+              parameters:
+                - name: method
+                  value: "POST"
+                - name: url
+                  value: "{{workflow.parameters.clusterIPport}}/api/v1/applications"
+              artifacts:
+                - name: body
+                  from: "{{inputs.artifacts.curl-body}}"
+            when: "{{inputs.parameters.curl-actionflag}} == CREATE"
+          - name: curl-update
+            template: curlwithbody-template
+            arguments:
+              parameters:
+                - name: method
+                  value: "PUT"
+                - name: url
+                  value: "{{workflow.parameters.clusterIPport}}/api/v1/applications/{{inputs.parameters.curl-name}}"
+              artifacts:
+                - name: body
+                  from: "{{inputs.artifacts.curl-body}}"
+            when: "{{inputs.parameters.curl-actionflag}} == UPDATE"
+          - name: curl-delete
+            template: curlwithoutbody-template
+            arguments:
+              parameters:
+                - name: method
+                  value: "DELETE"
+                - name: url
+                  value: "{{workflow.parameters.clusterIPport}}/api/v1/applications/{{inputs.parameters.curl-name}}"
+            when: "{{inputs.parameters.curl-actionflag}} == DELETE"
+        - - name: curl-validation
+            template: curlvalidation-template
+            arguments:
+              parameters:
+              - name: status-create
+                value: "{{steps.curl-create.status}}"
+              - name: status-update
+                value: "{{steps.curl-update.status}}"
+              - name: status-delete
+                value: "{{steps.curl-delete.status}}"
+              - name: response-create
+                value: "{{steps.curl-create.outputs.result}}"
+              - name: response-update
+                value: "{{steps.curl-update.outputs.result}}"
+              - name: response-delete
+                value: "{{steps.curl-delete.outputs.result}}"
+#######
+    - name: curlwithbody-template
+      inputs:
+        parameters:
+          - name: method
+          - name: url
+          - name: argocdtoken
+            value: "{{workflow.parameters.argocdtoken}}"
+        artifacts:
+          - name: body
+            path: /tmp/bodyjson.json
+      script:
+        image: tutum/curl
+        command: [bash]
+        source: |
+          curl -sL -X "{{inputs.parameters.method}}" "https://{{inputs.parameters.url}}" -H "Authorization: Bearer {{inputs.parameters.argocdtoken}}" -d @/tmp/bodyjson.json -k
+########
+    - name: curlwithoutbody-template
+      inputs:
+        parameters:
+          - name: method
+          - name: url
+          - name: argocdtoken
+            value: "{{workflow.parameters.argocdtoken}}"
+      script:
+        image: tutum/curl
+        command: [bash]
+        source: |
+          curl -sL -X "{{inputs.parameters.method}}" "https://{{inputs.parameters.url}}" -H "Authorization: Bearer {{inputs.parameters.argocdtoken}}" -k
+#########
+    - name: argocdcred-template
+      inputs:
+        parameters:
+          - name: argocdid
+            value: "{{workflow.parameters.argoid}}"
+          - name: argocdpassword
+            value: "{{workflow.parameters.argopassword}}"
+      container:
+        image: taco-registry:5000/uitaek/appcd:skt2
+        command: [sh, -c]
+        args: ["
+        ./appcd argoinfo {{input.parameters.argocdid}} {{input.parameters.argocdpassword}} > /argoinfo;
+        cat /argoinfo;
+        "]
+      outputs:
+        parameters:
+          - name: argoinfo
+            valueFrom:
+              path: /argoinfo
+#########
+    - name: repodownload-template
+      inputs:
+        parameters:
+          - name: downloadurl
+        artifacts:
+          - name: temporary-git
+            path: /tmp
+            git:
+              repo: "{{inputs.parameters.downloadurl}}"
+              usernameSecret:
+                name: appcd-git
+                key: username
+              passwordSecret:
+                name: appcd-git
+                key: password
+      container:
+        image: alpine:3.8
+        command: [sh, -c]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+          limits:
+            cpu: 400m
+            memory: 800Mi
+        args: [""]
+      outputs:
+        artifacts:
+        - name: config
+          path: /tmp/configs
+#########
+    - name: appclassify-template
+      inputs:
+        artifacts:
+          - name: notsplit
+            path: /notsplit
+      script:
+        image: endeveit/docker-jq
+        command: [sh]
+        source: |
+          cat /notsplit;
+          mkdir /apps;
+          a=$(jq -r '[.items | . ]' < /notsplit | grep null);
+          if [ $a == "null" ];then
+                touch /apps/Autocurrentapps.json;
+                touch /apps/Manualcurrentapps.json;
+          else
+            jq -r '[.items | .[] | select(.metadata.labels.appcdoption == "Auto") | .]'< /notsplit >/apps/Autocurrentapps.json;
+            jq -r '[.items | .[] | select(.metadata.labels.appcdoption == "Manual") | .]'< /notsplit >/apps/Manualcurrentapps.json;
+          fi;
+          cat /apps/Autocurrentapps.json;
+          cat /apps/Manualcurrentapps.json;
+      outputs:
+        artifacts:
+          - name: currentapps
+            path: /apps
+########
+    - name: diffcurrentwithtarget-template
+      inputs:
+        parameters:
+          - name: flag
+        artifacts:
+          - name: configApps
+            path: /convertbyte.json
+          - name: currentApps
+            path: /current
+      script:
+        image: taco-registry:5000/uitaek/appcd:skt2
+        command: [/bin/sh]
+        source: |
+          mkdir /diff;
+          if [ "auto" == "{{inputs.parameters.flag}}" ];then
+            ./appcd diff '/current/Autocurrentapps.json' '/convertbyte.json'
+          else
+            ./appcd diff '/current/Manualcurrentapps.json' '/convertbyte.json'
+          fi;
+          echo '-------------create'
+          cat /diff/CREATE;
+          echo '-------------delete'
+          cat /diff/DELETE;
+          echo '-------------update'
+          cat /diff/UPDATE;
+      outputs:
+        artifacts:
+          - name: diffsrc
+            path: /diff
+#########
+    - name: lintconfig-template
+      inputs:
+        parameters:
+        - name: flag_lint
+        artifacts:
+        - name: configbyte_lint
+          path: /tmp
+      script:
+        image: taco-registry:5000/uitaek/appcd:skt2
+        command: [/bin/sh]
+        source: |
+          if [ "auto" == "{{inputs.parameters.flag_lint}}" ];then
+            ./appcd lint</tmp/Autoconfig.yaml;
+          else
+            ./appcd lint</tmp/Manualconfig.yaml;
+          fi;
+#########
+    - name: convertconfigtoapps-template
+      inputs:
+        artifacts:
+          - name: configbyte_convert
+            path: /tmp
+        parameters:
+          - name: flag_convert
+      script:
+        image: taco-registry:5000/uitaek/appcd:skt2
+        command: [/bin/sh]
+        source: |
+          cat /tmp/Autoconfig.yaml
+          cat /tmp/Manualconfig.yaml
+          if [ "auto" == "{{inputs.parameters.flag_convert}}" ];then
+            ./appcd convert auto </tmp/Autoconfig.yaml> /convertbyte.json;
+          else
+            ./appcd convert manual </tmp/Manualconfig.yaml> /convertbyte.json;
+          fi;
+          cat /convertbyte.json
+      outputs:
+        artifacts:
+          - name: convertbyte
+            path: /convertbyte.json
+##########
+    - name: findappnames-template
+      inputs:
+        artifacts:
+          - name: apps
+            path: /diff
+        parameters:
+          - name: action
+      script:
+        image: endeveit/docker-jq
+        command: [sh]
+        source: |
+          if [ "CREATE" == "{{inputs.parameters.action}}" ];then
+            a=$(cat /diff/CREATE)
+            if [ $a == "null" ];then
+              touch /appnames.txt
+            else
+              jq -c '[{"name":.[].metadata.name}]' < /diff/CREATE > /appnames.txt;
+            fi;
+          elif [ "DELETE" == "{{inputs.parameters.action}}" ];then
+            a=$(cat /diff/DELETE)
+            if [ $a == "null" ];then
+              touch /appnames.txt
+            else
+              jq -c '[{"name":.[].metadata.name}]' < /diff/DELETE > /appnames.txt;
+            fi;
+          elif [ "UPDATE" == "{{inputs.parameters.action}}" ];then
+            a=$(cat /diff/DELETE)
+            if [ $a == "null" ];then
+              touch /appnames.txt
+            else
+              jq -c '[{"name":.[].metadata.name}]' < /diff/UPDATE > /appnames.txt;
+            fi;
+          fi;
+          if [ -s /appnames.txt ];then
+            echo TRUE
+          else
+            echo FALSE
+          fi;
+      outputs:
+        parameters:
+          - name: appnames
+            valueFrom:
+              path: /appnames.txt
+############
+    - name: getrequestbodybyname-template
+      inputs:
+        artifacts:
+          - name: apps
+            path: /diff
+        parameters:
+          - name: name
+          - name: action
+      script:
+        image: endeveit/docker-jq
+        command: [sh]
+        source: |
+          ls -al /diff
+          if [ "CREATE" == "{{inputs.parameters.action}}" ];then
+            jq -r '.[] | select(.metadata.name == "{{inputs.parameters.name}}") | .' < /diff/CREATE > /requestbody.json;
+          elif [ "DELETE" == "{{inputs.parameters.action}}" ];then
+            jq -r '.[] | select(.metadata.name == "{{inputs.parameters.name}}") | .' < /diff/DELETE > /requestbody.json;
+          elif [ "UPDATE" == "{{inputs.parameters.action}}" ];then
+            jq -r '.[] | select(.metadata.name == "{{inputs.parameters.name}}") | .' < /diff/UPDATE > /requestbody.json;
+          fi;
+          cat /requestbody.json
+      outputs:
+        artifacts:
+          - name: requestbody
+            path: /requestbody.json
+############
+    - name: nobodycurl-template
+      inputs:
+        parameters:
+          - name: method
+          - name: url
+          - name: argocdtoken
+      script:
+        image: tutum/curl
+        command: [bash]
+        source: |
+          curl -sL -X "{{inputs.parameters.method}}" "https://{{inputs.parameters.url}}" -H "Authorization: Bearer {{inputs.parameters.argocdtoken}}" -k > /notsplit.json
+          cat /notsplit.json
+      outputs:
+        artifacts:
+          - name: notsplit
+            path: /notsplit.json
+############
+    - name: curlvalidation-template
+      inputs:
+        parameters:
+        - name: status-create
+        - name: status-update
+        - name: status-delete
+        - name: response-create
+        - name: response-update
+        - name: response-delete
+      script:
+        image: python:alpine3.6
+        command: [python]
+        source: |
+          import json
+          import sys
+          if "Succeeded" == "{{inputs.parameters.status-create}}":
+            resp={{inputs.parameters.response-create}}
+          elif "Succeeded" == "{{inputs.parameters.status-update}}":
+            resp={{inputs.parameters.response-update}}
+          elif "Succeeded" == "{{inputs.parameters.status-delete}}":
+            resp={{inputs.parameters.response-delete}}
+            if len(resp)<=1:
+              print("Deletion is succeeded\n")
+              sys.exit(0)
+            else:
+              print("Deletion is failed\n")
+              sys.exit(1)
+          if 'error' in resp:
+            print("Errors in request\n")
+            sys.exit(1);
+          elif 'metadata' not in resp :
+            print("No metadata in response\n")
+            sys.exit(2);
+          elif 'labels' not in resp['metadata']:
+            print("No labels in metadata\n")
+            sys.exit(3)
+          else:
+            print("validation succeeded\n")
+            sys.exit(0);
+##########
+    - name: getchartreponames-template
+      inputs:
+        artifacts:
+          - name: configApps
+            path: /tmp/convertbyte.json
+      script:
+        image: endeveit/docker-jq
+        command: [sh]
+        source: |
+          jq -c '[{"repourl":.[] | .spec.source.repoURL}]' < /tmp/convertbyte.json
+##########
+    - name: chartrepoadd-template
+      inputs:
+        parameters:
+          - name: chartreponame
+          - name: argourl
+          - name: token
+      script:
+        image: tutum/curl
+        command: [bash]
+        source: |
+          exist=$(curl -sL -X GET "https://{{inputs.parameters.argourl}}"  -H "Authorization: Bearer {{inputs.parameters.token}}" -k | grep -o "{{inputs.parameters.chartreponame}}")
+          if [ $exist == "{{inputs.parameters.chartreponame}}" ];then
+            if [ $(echo {{inputs.parameters.chartreponame}} | grep -o tde) == 'tde' ];then
+              echo '{' > /body.json
+              echo ' "repo" : "{{inputs.parameters.chartreponame}}",' >> /body.json
+              echo ' "password" : "{{workflow.parameters.tdepassword}}",' >>/body.json
+              echo ' "username" : "{{workflow.parameters.tdeid}}"' >>/body.json
+              echo '}' >> /body.json
+              cat /body.json
+              curl -sL -X POST "https://{{inputs.parameters.argourl}}" -H "Authorization: Bearer {{inputs.parameters.token}}" -d @/body.json -k
+            fi;
+          fi;
+##########
+    - name: repoauthset-dags
+      dag:
+        tasks:
+        - name: encode-ID
+          template: encode-template
+          arguments:
+            parameters:
+            - name: info
+              value: "{{workflow.parameters.tdeid}}"
+        - name: encode-PW
+          template: encode-template
+          arguments:
+            parameters:
+            - name: info
+              value: "{{workflow.parameters.tdepassword}}"
+        - name: makeaccountsecret
+          dependencies: [encode-ID, encode-PW]
+          template: makeaccountsecret-template
+          arguments:
+            parameters:
+            - name: encodedID
+              value:  "{{tasks.encode-ID.outputs.result}}"
+            - name: encodedPW
+              value:  "{{tasks.encode-PW.outputs.result}}"
+##########
+    - name: makeaccountsecret-template
+      inputs:
+        parameters:
+          - name: encodedID
+          - name: encodedPW
+      resource:                   # indicates that this is a resource template
+        action: apply             # can be any kubectl action (e.g. create, delete, apply, patch)
+        setOwnerReference: true
+        manifest: |               #put your kubernetes spec here
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: appcd-git
+          type: Opaque
+          data:
+            username: "{{inputs.parameters.encodedID}}"
+            password: "{{inputs.parameters.encodedPW}}"
+#########
+    - name: encode-template
+      inputs:
+        parameters:
+        - name: info
+      script:
+        image: bash
+        command: [bash]
+        source: |
+          echo -n "{{inputs.parameters.info}}" | base64

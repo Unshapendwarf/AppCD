@@ -1,0 +1,48 @@
+[
+   {
+      "metadata": {
+         "name": "chaoskube-out",
+         "labels": {
+            "appcdoption": "Auto"
+         }
+      },
+      "spec": {
+         "source": {
+            "repoURL": "https://github.com/helm/charts.git",
+            "path": "stable/chartmuseum",
+            "targetRevision": "master"
+         },
+         "destination": {
+            "server": "https://kubernetes.default.svc",
+            "namespace": "argo"
+         },
+         "project": "default",
+         "syncPolicy": {
+            "automated": {}
+         }
+      }
+   },
+   {
+      "metadata": {
+         "name": "chart-out",
+         "labels": {
+            "appcdoption": "Auto"
+         }
+      },
+      "spec": {
+         "source": {
+            "repoURL": "https://github.com/helm/charts.git",
+            "path": "stable/chaoskube",
+            "targetRevision": "master"
+         },
+         "destination": {
+            "server": "https://kubernetes.default.svc",
+            "namespace": "default"
+         },
+         "project": "default",
+         "syncPolicy": {
+            "automated": {}
+         }
+      }
+   }
+]

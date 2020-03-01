@@ -1,0 +1,16 @@
+# this is basic structure of appCD config file.
+# all these keys and values are essential(lint is not enought to handle typos or yaml form error)
+# this is Autoconfig
+orders:
+  - destination: https://kubernetes.default.svc
+    charts:
+      - repository: https://tde.sktelecom.com/stash/scm/oreotools/sample-helm-chart.git
+        revision: master
+        subpaths:
+          - path: stable/chaoskube
+            name: abc
+            namespace: default
+            chartvalues:
+              - "values.yaml"
+            chartdeploystrategy: Canarya
+            identifier: prefix
